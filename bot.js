@@ -2,33 +2,22 @@ const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuild
 const axios = require('axios');
 const express = require('express');
 
-// --- CONFIGURATION (Uses Render Environment Variables) ---
+// --- CONFIGURATION ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // Your Bot's Application ID
+const CLIENT_ID = process.env.CLIENT_ID; 
 const CLIENT_KEY = process.env.CLIENT_KEY; 
 
-// --- 1. DEBUG: INITIAL CHECK ---
-console.log("--- System Startup ---");
-console.log("Checking Environment Variables...");
-console.log("DISCORD_TOKEN defined:", !!DISCORD_TOKEN);
-console.log("CLIENT_ID defined:", !!CLIENT_ID);
-console.log("CLIENT_KEY defined:", !!CLIENT_KEY);
-
-// --- 2. DUMMY WEB SERVER (Required for Render Free Tier) ---
+// --- 1. DUMMY WEB SERVER ---
 const app = express();
-app.get('/', (req, res) => res.send('Bot is online and healthy!'));
+app.get('/', (req, res) => res.send('Bot is online!'));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Web health-check server listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`Health-check server on port ${PORT}`));
 
-// --- 3. DISCORD BOT SETUP ---
+// --- 2. DISCORD BOT SETUP (Minimal Intents) ---
 const client = new Client({ 
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildPresences // Required for status
-    ] 
+    intents: [GatewayIntentBits.Guilds] // No special setup needed in Portal for this
 });
 
-// Define the Slash Command
 const commands = [
     new SlashCommandBuilder()
         .setName('check')
@@ -41,39 +30,25 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
-// --- 4. BOT EVENTS ---
+// --- 3. BOT EVENTS ---
 client.once('ready', async () => {
-    console.log(`Logged in as ${client.user.tag}!`);
+    console.log(`✅ Success! Logged in as ${client.user.tag}`);
     
     try {
-        console.log('Started refreshing application (/) commands...');
+        console.log('Registering /check command...');
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('Successfully reloaded application (/) commands.');
-
-        // Set status: Watching checking emails
-        client.user.setPresence({
-            activities: [{ 
-                name: 'checking emails', 
-                type: 3 // 3 = "Watching"
-            }],
-            status: 'online',
-        });
-        console.log("Presence/Status set to: Watching checking emails");
-
+        console.log('Commands registered successfully.');
     } catch (error) {
-        console.error("CRITICAL ERROR during startup:", error);
+        console.error("Command Registration Error:", error);
     }
 });
 
-// Handle Slash Command Interactions
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'check') {
         const accountString = interaction.options.getString('account');
-        console.log(`Command /check received for account: ${accountString.split(':')[0]}...`);
-        
-        await interaction.deferReply(); // Give API time to work
+        await interaction.deferReply();
 
         try {
             const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', {
@@ -84,33 +59,23 @@ client.on('interactionCreate', async interaction => {
                 }
             });
 
-            const result = response.data;
-
-            if (result.success) {
+            if (response.data.success) {
                 const embed = new EmbedBuilder()
-                    .setTitle('📧 Latest Email Found')
+                    .setTitle('📧 Latest Email')
                     .setColor(0x5865F2)
-                    .setDescription(`\`\`\`json\n${JSON.stringify(result.data, null, 2)}\n\`\`\``)
-                    .setFooter({ text: 'Hotmail007 API' })
-                    .setTimestamp();
-
+                    .setDescription(`\`\`\`json\n${JSON.stringify(response.data.data, null, 2)}\n\`\`\``);
                 await interaction.editReply({ embeds: [embed] });
             } else {
-                console.warn("API returned success:false", result);
-                await interaction.editReply(`❌ **API Error:** Code ${result.code || 'Unknown'}. Check your account data format.`);
+                await interaction.editReply(`❌ API Error: ${response.data.code}`);
             }
         } catch (error) {
-            console.error("API Request Failed:", error.message);
-            await interaction.editReply('🔥 **System Error:** Could not connect to the Hotmail007 API.');
+            await interaction.editReply('🔥 Connection to Hotmail007 failed.');
         }
     }
 });
 
-// --- 5. ERROR HANDLING & LOGIN ---
-client.on('error', (err) => console.error("Discord Client Error:", err));
-
-console.log("Attempting to login to Discord...");
+// --- 4. LOGIN ---
+console.log("Connecting to Discord...");
 client.login(DISCORD_TOKEN).catch(err => {
-    console.error("LOGIN FAILED! Check your DISCORD_TOKEN.");
-    console.error(err);
+    console.error("Login failed. Check your token in Render Environment variables.");
 });
