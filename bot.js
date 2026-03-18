@@ -2,165 +2,136 @@ const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuild
 const axios = require('axios');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const express = require('express');
+const crypto = require('crypto');
 
-// --- 1. IMPORT PROXY LIST ---
+// --- 1. CONFIG & SETUP ---
 const PRIVATE_PROXIES = require('./proxies.json');
+const tempHtmlStore = new Map();
+const AUTHORIZED_USER = "1421189973918351540";
+const BOT_DOMAIN = "https://p01--hotmail--dl7r4gtkhsjg.code.run";
 
-// --- CONFIGURATION ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const EMBEDDED_KEY = process.env.CLIENT_KEY; 
-const AUTHORIZED_USER = "1421189973918351540"; 
 
-// --- 2. NORTHFLANK HEALTH CHECK SERVER ---
+// --- 2. NORTHFLANK WEB SERVER ---
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('Bot Active'));
-app.get('/health', (req, res) => res.status(200).send('OK')); // Critical for Northflank
+app.get('/health', (req, res) => res.status(200).send('OK'));
 
-app.listen(port, '0.0.0.0', () => {
-    console.log(`✅ Web Server Online on port ${port} (0.0.0.0)`);
+// Serve the HTML preview
+app.get('/view/:id', (req, res) => {
+    const html = tempHtmlStore.get(req.params.id);
+    if (html) {
+        res.setHeader('Content-Type', 'text/html');
+        res.send(html);
+    } else {
+        res.status(404).send('<h1>Link Expired</h1><p>Email previews are purged after 60 seconds.</p>');
+    }
 });
 
+app.listen(port, '0.0.0.0', () => console.log(`✅ Web Server Online`));
+
+// --- 3. DISCORD CLIENT ---
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
     new SlashCommandBuilder()
         .setName('check')
-        .setDescription('Admin: Fetch email with Random Proxy & Fallback')
+        .setDescription('Fetch email with extraction/view options')
         .addStringOption(opt => opt.setName('account').setDescription('Email:Pass:Token:ID').setRequired(true))
-        .addBooleanOption(opt => opt.setName('use_proxy').setDescription('Enable/Disable random proxy rotation').setRequired(true)),
-    new SlashCommandBuilder()
-        .setName('usercheck')
-        .setDescription('Public: Fetch email with custom key/proxy')
-        .addStringOption(opt => opt.setName('key').setDescription('Your Client Key').setRequired(true))
-        .addStringOption(opt => opt.setName('account').setDescription('Email:Pass:Token:ID').setRequired(true))
-        .addStringOption(opt => opt.setName('proxy').setDescription('SOCKS5 (host:port:user:pass)').setRequired(false))
+        .addBooleanOption(opt => opt.setName('use_proxy').setDescription('Enable random proxy').setRequired(true))
+        .addStringOption(opt => opt.setName('display').setDescription('Output format').setRequired(true)
+            .addChoices(
+                { name: 'Extract 6-Digit Code', value: 'extract' },
+                { name: 'View as HTML Webpage', value: 'html' },
+                { name: 'Raw JSON Data', value: 'json' }
+            )),
 ].map(c => c.toJSON());
 
-// --- 3. CORE LOGIC (Checklist + Random Retry + Fallback) ---
-async function handleEmailFetch(interaction, targetKey, accountData, useProxy = false, manualProxy = null) {
-    const statusEmbed = new EmbedBuilder()
-        .setTitle('🔍 Processing Request')
-        .setColor(0xFEE75C)
-        .setDescription(`🟡 **Validating Inputs**\n⚪ **Proxy Connection**\n⚪ **Fetching Email Data**`);
+// --- 4. CORE FETCH LOGIC ---
+async function handleEmailFetch(interaction, accountData, displayType, useProxy) {
+    if (!interaction.deferred) await interaction.deferReply();
 
-    if (!interaction.deferred && !interaction.replied) await interaction.reply({ embeds: [statusEmbed] });
-
-    const cleanKey = targetKey.trim();
-    const cleanAccount = accountData.trim();
-    
     let attempts = 0;
     const maxProxyAttempts = useProxy ? 3 : 0;
     let success = false;
 
-    // --- PHASE 1: RANDOM PROXY ATTEMPTS ---
-    while (attempts < maxProxyAttempts && !success) {
+    while (attempts <= maxProxyAttempts && !success) {
         attempts++;
+        const isFallback = (attempts > maxProxyAttempts);
         
-        let currentProxy = manualProxy || PRIVATE_PROXIES[Math.floor(Math.random() * PRIVATE_PROXIES.length)];
+        const axiosConfig = { 
+            params: { clientKey: EMBEDDED_KEY.trim(), account: accountData.trim(), folder: 'inbox' },
+            timeout: 15000 
+        };
 
-        statusEmbed.setDescription(
-            `✅ **Inputs Validated**\n` +
-            `🟡 **Verifying Proxy Connection... (Attempt ${attempts}/3)**\n` +
-            `⚪ **Fetching Email Data**`
-        );
-        await interaction.editReply({ embeds: [statusEmbed] });
+        if (useProxy && !isFallback) {
+            const proxy = PRIVATE_PROXIES[Math.floor(Math.random() * PRIVATE_PROXIES.length)];
+            const [host, port, user, pass] = proxy.split(':');
+            const agent = new SocksProxyAgent(`socks5://${user}:${pass}@${host}:${port}`);
+            axiosConfig.httpAgent = agent; axiosConfig.httpsAgent = agent;
+        }
 
         try {
-            const [host, port, user, pass] = currentProxy.trim().split(':');
-            const agent = new SocksProxyAgent(`socks5://${user}:${pass}@${host}:${port}`);
-            
-            // Pre-flight check to see if proxy is alive
-            await axios.get('https://api.ipify.org', { 
-                httpAgent: agent, 
-                httpsAgent: agent, 
-                timeout: 8000 
-            });
-
-            statusEmbed.setDescription(
-                `✅ **Inputs Validated**\n` +
-                `✅ **Proxy Connected (${host})**\n` +
-                `🟡 **Fetching Email Data...**`
-            );
-            await interaction.editReply({ embeds: [statusEmbed] });
-
-            const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', {
-                params: { clientKey: cleanKey, account: cleanAccount, folder: 'inbox' },
-                httpAgent: agent,
-                httpsAgent: agent,
-                timeout: 15000
-            });
-
+            const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', axiosConfig);
             if (response.data.success) {
                 success = true;
-                return sendSuccess(interaction, response.data.data, `Random Proxy: ${host}`);
+                const email = response.data.data;
+                const body = email.body || "";
+                const embed = new EmbedBuilder().setColor(0x57F287).setTimestamp();
+
+                if (displayType === 'extract') {
+                    const codeMatch = body.match(/\b\d{6}\b/);
+                    const code = codeMatch ? codeMatch[0] : "No 6-digit code found.";
+                    embed.setTitle('🔢 Verification Code')
+                         .setDescription(`Code: **${code}**`);
+                } 
+                else if (displayType === 'html') {
+                    const viewId = crypto.randomBytes(8).toString('hex');
+                    tempHtmlStore.set(viewId, body);
+                    
+                    // Auto-delete from memory after 60s
+                    setTimeout(() => {
+                        tempHtmlStore.delete(viewId);
+                        console.log(`🗑️ Purged HTML view: ${viewId}`);
+                    }, 60000);
+
+                    embed.setTitle('🌐 HTML View Ready')
+                         .setDescription(`This link expires in 60 seconds:\n\n[**View Email Content**](${BOT_DOMAIN}/view/${viewId})`);
+                } 
+                else {
+                    embed.setTitle('📧 Raw JSON Result')
+                         .setDescription(`\`\`\`json\n${JSON.stringify(email, null, 2).substring(0, 1900)}\n\`\`\``);
+                }
+
+                return interaction.editReply({ embeds: [embed] });
             }
-        } catch (e) { 
-            console.log(`Proxy ${attempts} failed: ${e.message}`); 
-        }
-    }
-
-    // --- PHASE 2: FALLBACK (Direct Connection) ---
-    if (!success) {
-        statusEmbed.setDescription(`✅ **Inputs Validated**\n⚠️ **Proxies Failed/Skipped**\n🟡 **Attempting Direct Connection...**`);
-        await interaction.editReply({ embeds: [statusEmbed] });
-
-        try {
-            const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', {
-                params: { clientKey: cleanKey, account: cleanAccount, folder: 'inbox' },
-                timeout: 12000
-            });
-
-            if (response.data.success) {
-                return sendSuccess(interaction, response.data.data, "Direct Fallback (No Proxy)");
-            } else {
-                statusEmbed.setColor(0xED4245).setDescription(`❌ **API Error:** ${response.data.msg}`);
-                return interaction.editReply({ embeds: [statusEmbed] });
+        } catch (e) {
+            if (isFallback || attempts > maxProxyAttempts) {
+                return interaction.editReply(`❌ Error: ${e.message}`);
             }
-        } catch (error) {
-            statusEmbed.setColor(0x000000).setTitle('🔥 All Methods Failed')
-                .setDescription(`❌ **Random Proxies:** Failed\n❌ **Direct Fallback:** ${error.message}`);
-            await interaction.editReply({ embeds: [statusEmbed] });
         }
     }
 }
 
-function sendSuccess(interaction, data, method) {
-    const embed = new EmbedBuilder()
-        .setTitle('📧 Email Found Successfully')
-        .setColor(0x57F287)
-        .setDescription(`\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``)
-        .setFooter({ text: `Method: ${method}` })
-        .setTimestamp();
-    return interaction.editReply({ embeds: [embed] });
-}
-
-// --- 4. INTERACTION HANDLER ---
 client.on('interactionCreate', async i => {
     if (!i.isChatInputCommand()) return;
-    const account = i.options.getString('account');
+    if (i.user.id !== AUTHORIZED_USER) return i.reply({ content: "Unauthorized", ephemeral: true });
 
     if (i.commandName === 'check') {
-        if (i.user.id !== AUTHORIZED_USER) return i.reply({ content: "❌ Unauthorized.", ephemeral: true });
+        const account = i.options.getString('account');
         const useProxy = i.options.getBoolean('use_proxy');
-        return handleEmailFetch(i, EMBEDDED_KEY, account, useProxy); 
-    }
-
-    if (i.commandName === 'usercheck') {
-        const key = i.options.getString('key');
-        const proxy = i.options.getString('proxy');
-        return handleEmailFetch(i, key, account, !!proxy, proxy);
+        const display = i.options.getString('display');
+        return handleEmailFetch(i, account, display, useProxy);
     }
 });
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
-    try {
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log(`✅ Bot Online | Random Rotation Active`);
-    } catch (err) { console.error(err); }
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log(`✅ ${client.user.tag} Online | HTML Auto-Purge Enabled`);
 });
-
 client.login(DISCORD_TOKEN);
