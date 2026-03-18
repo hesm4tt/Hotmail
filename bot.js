@@ -49,13 +49,15 @@ async function handleEmailFetch(interaction, targetKey, accountData, proxyString
 
     if (proxyString) {
         const [host, port, username, password] = proxyString.trim().split(':');
-        axiosConfig.httpsAgent = socksAdapter({
-            host: host,
-            port: parseInt(port),
-            auth: username && password ? { username, password } : undefined
+        // Updated for axios-socks5-adapter
+        axiosConfig.httpAgent = socksAdapter(host, parseInt(port), {
+            username: username,
+            password: password
         });
+        axiosConfig.httpsAgent = axiosConfig.httpAgent;
         console.log(`📡 Request using proxy: ${host}:${port}`);
     }
+
 
     try {
         const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', axiosConfig);
