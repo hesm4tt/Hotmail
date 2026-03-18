@@ -1,17 +1,19 @@
-FROM node:18-slim
+# Switch to Alpine for better compatibility and speed
+FROM node:18-alpine
 
-WORKDIR /usr/src/app
+# Set the working directory
+WORKDIR /app
 
-# Set npm to be less strict with SSL (fixes many build server hangs)
-RUN npm config set strict-ssl false
+# Copy ONLY the package files first
+COPY package.json ./
 
-COPY package*.json ./
+# Run install (using --no-optional to avoid platform-specific errors)
+RUN npm install --production --no-optional
 
-# Added --no-audit to speed up and prevent some failure triggers
-RUN npm install --production --no-audit
-
+# Copy everything else (bot.js, proxies.json, etc.)
 COPY . .
 
+# Match the port in your bot.js
 EXPOSE 3000
 
-CMD [ "node", "bot.js" ]
+CMD ["node", "bot.js"]
