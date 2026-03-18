@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
-const socksAdapter = require('axios-socks5-adapter');
+const { SocksProxyAgent } = require('socks-proxy-agent'); // Updated library
 const express = require('express');
 
 // --- 1. IMPORT PROXY LIST ---
@@ -13,18 +13,16 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const EMBEDDED_KEY = process.env.CLIENT_KEY; 
 const AUTHORIZED_USER = "1421189973918351540"; 
 
-// --- 2. HEALTH CHECK SERVER ---
 const app = express();
-app.get('/', (req, res) => res.send('Bot is active and rotating proxies.'));
+app.get('/', (req, res) => res.send('Bot is active and rotating.'));
 app.listen(process.env.PORT || 3000);
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// --- 3. COMMAND DEFINITIONS ---
 const commands = [
     new SlashCommandBuilder()
         .setName('check')
-        .setDescription('Admin: Fetch email using Private Proxy Rotation')
+        .setDescription('Admin: Fetch email using Proxy Rotation')
         .addStringOption(opt => opt.setName('account').setDescription('Email:Pass:Token:ID').setRequired(true)),
     new SlashCommandBuilder()
         .setName('usercheck')
@@ -34,66 +32,54 @@ const commands = [
         .addStringOption(opt => opt.setName('proxy').setDescription('SOCKS5 (host:port:user:pass)').setRequired(false))
 ].map(c => c.toJSON());
 
-// --- 4. CORE FETCH LOGIC ---
+// --- 3. CORE FETCH LOGIC ---
 async function handleEmailFetch(interaction, targetKey, accountData, proxyString) {
     if (!interaction.deferred && !interaction.replied) await interaction.deferReply();
 
     const axiosConfig = {
-        params: { 
-            clientKey: targetKey.trim(), 
-            account: accountData.trim(), 
-            folder: 'inbox' 
-        },
-        timeout: 20000 // Increased to 20s for proxy overhead
+        params: { clientKey: targetKey.trim(), account: accountData.trim(), folder: 'inbox' },
+        timeout: 25000 
     };
 
     if (proxyString) {
-        const [host, port, username, password] = proxyString.trim().split(':');
-        // Updated for axios-socks5-adapter
-        axiosConfig.httpAgent = socksAdapter(host, parseInt(port), {
-            username: username,
-            password: password
-        });
-        axiosConfig.httpsAgent = axiosConfig.httpAgent;
-        console.log(`📡 Request using proxy: ${host}:${port}`);
+        try {
+            const [host, port, user, pass] = proxyString.trim().split(':');
+            // Format: socks5://user:pass@host:port
+            const proxyUrl = `socks5://${user}:${pass}@${host}:${port}`;
+            const agent = new SocksProxyAgent(proxyUrl);
+            
+            axiosConfig.httpAgent = agent;
+            axiosConfig.httpsAgent = agent;
+            console.log(`📡 Using Proxy: ${host}:${port}`);
+        } catch (e) {
+            return interaction.editReply("❌ Invalid proxy format in database.");
+        }
     }
-
 
     try {
         const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', axiosConfig);
-        const result = response.data;
-
-        if (result.success) {
+        if (response.data.success) {
             const embed = new EmbedBuilder()
                 .setTitle('📧 Email Found')
                 .setColor(0x5865F2)
-                .setDescription(`\`\`\`json\n${JSON.stringify(result.data, null, 2)}\n\`\`\``)
-                .setFooter({ text: `Proxy used: ${proxyString ? 'Yes' : 'No'}` });
+                .setDescription(`\`\`\`json\n${JSON.stringify(response.data.data, null, 2)}\n\`\`\``);
             await interaction.editReply({ embeds: [embed] });
         } else {
-            await interaction.editReply(`❌ **API Error:** ${result.msg || 'Check account format.'}`);
+            await interaction.editReply(`❌ **API Error:** ${response.data.msg}`);
         }
     } catch (error) {
-        console.error("Fetch Error:", error.message);
         await interaction.editReply(`🔥 **Connection Failed:** ${error.message}`);
     }
 }
 
-// --- 5. INTERACTION HANDLER ---
 client.on('interactionCreate', async i => {
     if (!i.isChatInputCommand()) return;
     const account = i.options.getString('account');
 
     if (i.commandName === 'check') {
         if (i.user.id !== AUTHORIZED_USER) return i.reply({ content: "Unauthorized.", ephemeral: true });
-        
-        // Select and rotate proxy
-        let selectedProxy = null;
-        if (PRIVATE_PROXIES.length > 0) {
-            selectedProxy = PRIVATE_PROXIES[proxyIndex];
-            proxyIndex = (proxyIndex + 1) % PRIVATE_PROXIES.length;
-        }
-        
+        let selectedProxy = PRIVATE_PROXIES.length > 0 ? PRIVATE_PROXIES[proxyIndex] : null;
+        proxyIndex = (proxyIndex + 1) % PRIVATE_PROXIES.length;
         return handleEmailFetch(i, EMBEDDED_KEY, account, selectedProxy);
     }
 
@@ -106,10 +92,7 @@ client.on('interactionCreate', async i => {
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
-    try {
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log(`✅ ${client.user.tag} Online | ${PRIVATE_PROXIES.length} Proxies Loaded.`);
-    } catch (err) { console.error(err); }
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log(`✅ Bot Online | ${PRIVATE_PROXIES.length} Proxies Loaded.`);
 });
-
 client.login(DISCORD_TOKEN);
