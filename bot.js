@@ -32,9 +32,20 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 client.once('ready', async () => {
     try {
+        // Registering Slash Commands
         console.log('Started refreshing application (/) commands.');
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log('Successfully reloaded application (/) commands.');
+
+        // --- SETTING THE STATUS ---
+        client.user.setPresence({
+            activities: [{ 
+                name: 'checking emails', 
+                type: 3 // Type 3 is "Watching"
+            }],
+            status: 'online',
+        });
+
         console.log(`Logged in as ${client.user.tag}!`);
     } catch (error) {
         console.error(error);
