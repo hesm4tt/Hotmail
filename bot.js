@@ -8,10 +8,11 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const EMBEDDED_KEY = process.env.CLIENT_KEY; 
 const AUTHORIZED_USER = "1421189973918351540"; 
 
-// --- 1. DUMMY WEB SERVER ---
+// --- 1. DUMMY WEB SERVER (For Northflank/Render) ---
 const app = express();
 app.get('/', (req, res) => res.send('Bot is active'));
-app.listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Health-check server on port ${PORT}`));
 
 // --- 2. BOT SETUP ---
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -35,33 +36,38 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
     try {
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log(`✅ ${client.user.tag} is online.`);
-    } catch (error) { console.error(error); }
+        console.log(`✅ ${client.user.tag} is online and commands registered.`);
+    } catch (error) { console.error("Registration Error:", error); }
 });
 
 // --- 3. CORE LOGIC FUNCTION ---
-async function handleEmailFetch(interaction, targetKey, accountData) {
+async function handleEmailFetch(interaction, rawKey, rawAccount) {
+    // AUTO-TRIM: Removes accidental spaces from start/end of inputs
+    const targetKey = rawKey.trim();
+    const accountData = rawAccount.trim();
+    
     const now = Date.now();
-    const commandName = interaction.commandName || 'retry';
+    const commandId = interaction.commandName || 'retry';
     
     // Cooldown Check
     const timestamps = cooldowns.get(interaction.user.id) || new Collection();
     const cooldownAmount = COOLDOWN_SECONDS * 1000;
-    if (timestamps.has(commandName)) {
-        const expirationTime = timestamps.get(commandName) + cooldownAmount;
+    
+    if (timestamps.has(commandId)) {
+        const expirationTime = timestamps.get(commandId) + cooldownAmount;
         if (now < expirationTime) {
             const timeLeft = ((expirationTime - now) / 1000).toFixed(1);
-            return interaction.reply({ content: `⏳ Cooldown active. Wait ${timeLeft}s.`, ephemeral: true });
+            return interaction.reply({ content: `⏳ Cooldown active. Try again in ${timeLeft}s.`, ephemeral: true });
         }
     }
 
     if (!interaction.deferred && !interaction.replied) await interaction.deferReply();
-    else await interaction.editReply({ content: '🔍 Retrying request...', embeds: [], components: [] });
+    else await interaction.editReply({ content: '🔍 Processing request...', embeds: [], components: [] });
 
     try {
         const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', {
             params: { clientKey: targetKey, account: accountData, folder: 'inbox' },
-            timeout: 10000 // 10 second timeout
+            timeout: 10000 
         });
 
         const result = response.data;
@@ -71,41 +77,37 @@ async function handleEmailFetch(interaction, targetKey, accountData) {
                 .setTitle('📧 Latest Email Found')
                 .setColor(0x5865F2)
                 .setDescription(`\`\`\`json\n${JSON.stringify(result.data, null, 2)}\n\`\`\``)
-                .setFooter({ text: `Success • Account: ${accountData.split(':')[0]}` });
+                .setFooter({ text: `Account: ${accountData.split(':')[0]}` })
+                .setTimestamp();
 
             await interaction.editReply({ content: '', embeds: [embed], components: [] });
-            timestamps.set(commandName, now);
+            
+            // Set cooldown on success
+            timestamps.set(commandId, now);
             cooldowns.set(interaction.user.id, timestamps);
         } else {
-            // Detailed API Error Reporting
             const errorEmbed = new EmbedBuilder()
-                .setTitle('❌ API Error Received')
-                .setColor(0xff0000)
+                .setTitle('❌ API Refused Request')
+                .setColor(0xffcc00)
                 .addFields(
-                    { name: 'Code', value: String(result.code || 'N/A'), inline: true },
-                    { name: 'Message', value: result.msg || 'No message provided by API.', inline: true },
-                    { name: 'Fix', value: 'Verify your account string format and key balance.' }
+                    { name: 'Error Code', value: String(result.code || '1'), inline: true },
+                    { name: 'API Message', value: result.msg || 'Invalid parameters or low balance.', inline: true }
                 );
 
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('retry_btn').setLabel('Retry Now').setStyle(ButtonStyle.Primary)
-            );
-
-            await interaction.editReply({ embeds: [errorEmbed], components: [row] });
+            await interaction.editReply({ embeds: [errorEmbed] });
         }
     } catch (error) {
-        // Detailed Connection Error Reporting
-        let errorType = error.code === 'ECONNABORTED' ? 'Timeout (Server took too long)' : 'Network Error';
-        if (error.response) errorType = `Server Error (${error.response.status})`;
+        let errorDesc = "The Hotmail007 server did not respond.";
+        if (error.code === 'ECONNABORTED') errorDesc = "Request timed out (API is too slow).";
+        if (error.response?.status === 429) errorDesc = "Rate limited by API. Wait 5-10 mins.";
 
         const connEmbed = new EmbedBuilder()
             .setTitle('🔥 Connection Failed')
             .setColor(0x000000)
-            .setDescription(`**Error Type:** ${errorType}\n**Message:** ${error.message}`)
-            .setFooter({ text: 'The API might be rate-limiting the bot IP.' });
+            .setDescription(`**Detail:** ${errorDesc}\n**System Msg:** ${error.message}`);
 
         const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('retry_btn').setLabel('Retry Connection').setStyle(ButtonStyle.Danger)
+            new ButtonBuilder().setCustomId('retry_msg').setLabel('How to Fix').setStyle(ButtonStyle.Secondary)
         );
 
         await interaction.editReply({ embeds: [connEmbed], components: [row] });
@@ -114,29 +116,26 @@ async function handleEmailFetch(interaction, targetKey, accountData) {
 
 // --- 4. INTERACTION HANDLER ---
 client.on('interactionCreate', async interaction => {
-    // Handle Commands
     if (interaction.isChatInputCommand()) {
         const { commandName, user, options } = interaction;
         const account = options.getString('account');
 
         if (commandName === 'check') {
-            if (user.id !== AUTHORIZED_USER) return interaction.reply({ content: "❌ Unauthorized.", ephemeral: true });
+            if (user.id !== AUTHORIZED_USER) return interaction.reply({ content: "❌ Unauthorized User.", ephemeral: true });
             return handleEmailFetch(interaction, EMBEDDED_KEY, account);
         }
 
         if (commandName === 'usercheck') {
-            const key = options.getString('key');
-            return handleEmailFetch(interaction, key, account);
+            const userKey = options.getString('key');
+            return handleEmailFetch(interaction, userKey, account);
         }
     }
 
-    // Handle Retry Button
-    if (interaction.isButton() && interaction.customId === 'retry_btn') {
-        // Find the original data from the embed footer or content
-        const account = interaction.message.embeds[0].description.includes('json') ? null : interaction.message.embeds[0].footer.text.split(' ')[2];
-        // Note: For full robustness in a multi-user bot, you'd store state in a database,
-        // but for this simple version, we will re-trigger the logic based on the interaction.
-        await interaction.reply({ content: "Please run the command again to retry with fresh data.", ephemeral: true });
+    if (interaction.isButton() && interaction.customId === 'retry_msg') {
+        await interaction.reply({ 
+            content: "1. Ensure your Account String has no spaces around the colons.\n2. Check if your Hotmail007 balance is > $0.\n3. If you see 'Connection Failed' multiple times, the Bot IP is likely blocked; wait 10 minutes.", 
+            ephemeral: true 
+        });
     }
 });
 
