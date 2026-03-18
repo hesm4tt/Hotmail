@@ -1,54 +1,60 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
 const express = require('express');
 
-// --- CONFIGURATION (Safe Version) ---
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN; 
+// --- CONFIGURATION ---
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID; // You need your Bot's Application ID here
 const CLIENT_KEY = process.env.CLIENT_KEY; 
-// ------------------------------------
-
 // ---------------------
 
-// 1. DUMMY WEB SERVER (Required for Render Free Tier)
+// 1. DUMMY WEB SERVER (For Render)
 const app = express();
-app.get('/', (req, res) => res.send('Bot is online and healthy!'));
-app.listen(process.env.PORT || 3000, () => console.log('Web health-check server ready.'));
+app.get('/', (req, res) => res.send('Bot is online!'));
+app.listen(process.env.PORT || 3000);
 
-// 2. DISCORD BOT LOGIC
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent
-    ]
+// 2. DISCORD BOT SETUP
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// Define the Slash Command
+const commands = [
+    new SlashCommandBuilder()
+        .setName('check')
+        .setDescription('Fetch the latest email from Hotmail007')
+        .addStringOption(option => 
+            option.setName('account')
+            .setDescription('Format: Email:Pass:Token:ID')
+            .setRequired(true))
+].map(command => command.toJSON());
+
+// Register Slash Commands
+const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+client.once('ready', async () => {
+    try {
+        console.log('Started refreshing application (/) commands.');
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log('Successfully reloaded application (/) commands.');
+        console.log(`Logged in as ${client.user.tag}!`);
+    } catch (error) {
+        console.error(error);
+    }
 });
 
-client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag}!`);
-});
+// Handle Slash Command Interactions
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
 
-client.on('messageCreate', async (message) => {
-    // Ignore messages from bots
-    if (message.author.bot) return;
-
-    // Command: !check [AccountString]
-    if (message.content.startsWith('!check')) {
-        const args = message.content.split(' ');
-        const accountString = args[1];
-
-        if (!accountString) {
-            return message.reply('⚠️ **Usage:** `!check Email:Pass:Token:ID`');
-        }
+    if (interaction.commandName === 'check') {
+        const accountString = interaction.options.getString('account');
+        await interaction.deferReply(); // Give the API time to respond
 
         try {
-            // Inform the user we are working on it
-            const loadingMsg = await message.reply('🔍 Fetching latest email...');
-
             const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', {
                 params: {
-                    clientKey: CLIENT_KEY, // Using the hardcoded variable
-                    account: accountString, // The input from Discord
-                    [span_5](start_span)folder: 'inbox'         // Options: inbox, junkemail[span_5](end_span)
+                    clientKey: CLIENT_KEY,
+                    account: accountString,
+                    folder: 'inbox'
                 }
             });
 
@@ -58,16 +64,14 @@ client.on('messageCreate', async (message) => {
                 const embed = new EmbedBuilder()
                     .setTitle('📧 Latest Email Found')
                     .setColor(0x5865F2)
-                    .setDescription(`\`\`\`json\n${JSON.stringify(result.data, null, 2)}\n\`\`\``)
-                    .setTimestamp();
+                    .setDescription(`\`\`\`json\n${JSON.stringify(result.data, null, 2)}\n\`\`\``);
 
-                await loadingMsg.edit({ content: '✅ Done!', embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
             } else {
-                await loadingMsg.edit(`❌ **API Error:** ${result.code || 'Check account data format.'}`);
+                await interaction.editReply(`❌ **API Error:** ${result.code || 'Check account data.'}`);
             }
         } catch (error) {
-            console.error(error);
-            message.reply('🔥 **System Error:** Failed to connect to Hotmail007 servers.');
+            await interaction.editReply('🔥 **System Error:** Failed to connect to API.');
         }
     }
 });
