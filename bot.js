@@ -5,7 +5,6 @@ const express = require('express');
 
 // --- 1. IMPORT PROXY LIST ---
 const PRIVATE_PROXIES = require('./proxies.json');
-let proxyIndex = 0;
 
 // --- CONFIGURATION ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -22,9 +21,9 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const commands = [
     new SlashCommandBuilder()
         .setName('check')
-        .setDescription('Admin: Fetch email with Proxy Toggle & Fallback')
+        .setDescription('Admin: Fetch email with Random Proxy & Fallback')
         .addStringOption(opt => opt.setName('account').setDescription('Email:Pass:Token:ID').setRequired(true))
-        .addBooleanOption(opt => opt.setName('use_proxy').setDescription('Enable/Disable proxy rotation').setRequired(true)),
+        .addBooleanOption(opt => opt.setName('use_proxy').setDescription('Enable/Disable random proxy rotation').setRequired(true)),
     new SlashCommandBuilder()
         .setName('usercheck')
         .setDescription('Public: Fetch email with custom key/proxy')
@@ -33,7 +32,7 @@ const commands = [
         .addStringOption(opt => opt.setName('proxy').setDescription('SOCKS5 (host:port:user:pass)').setRequired(false))
 ].map(c => c.toJSON());
 
-// --- 3. CORE LOGIC (Checklist + Retry + Fallback) ---
+// --- 3. CORE LOGIC (Checklist + Random Retry + Fallback) ---
 async function handleEmailFetch(interaction, targetKey, accountData, useProxy = false, manualProxy = null) {
     const statusEmbed = new EmbedBuilder()
         .setTitle('🔍 Processing Request')
@@ -48,14 +47,22 @@ async function handleEmailFetch(interaction, targetKey, accountData, useProxy = 
     let attempts = 0;
     const maxProxyAttempts = useProxy ? 3 : 0;
     let success = false;
+    let usedProxies = []; // Keep track of proxies used in this specific command run
 
-    // --- PHASE 1: PROXY ATTEMPTS ---
+    // --- PHASE 1: RANDOM PROXY ATTEMPTS ---
     while (attempts < maxProxyAttempts && !success) {
         attempts++;
-        let currentProxy = manualProxy || PRIVATE_PROXIES[proxyIndex];
-        if (!manualProxy) proxyIndex = (proxyIndex + 1) % PRIVATE_PROXIES.length;
+        
+        let currentProxy = manualProxy;
+        
+        // If it's a random rotation, pick a truly random index from the list
+        if (!manualProxy && PRIVATE_PROXIES.length > 0) {
+            const randomIndex = Math.floor(Math.random() * PRIVATE_PROXIES.length);
+            currentProxy = PRIVATE_PROXIES[randomIndex];
+            usedProxies.push(currentProxy.split(':')[0]); // Store IP for logging
+        }
 
-        statusEmbed.setDescription(`✅ **Inputs Validated**\n🟡 **Connecting to Proxy (Attempt ${attempts}/3)**\n⚪ **Fetching Email Data**`);
+        statusEmbed.setDescription(`✅ **Inputs Validated**\n🟡 **Connecting to Random Proxy (Attempt ${attempts}/3)**\n⚪ **Fetching Email Data**`);
         await interaction.editReply({ embeds: [statusEmbed] });
 
         const axiosConfig = {
@@ -63,29 +70,32 @@ async function handleEmailFetch(interaction, targetKey, accountData, useProxy = 
             timeout: 15000 
         };
 
-        const [host, port, user, pass] = currentProxy.trim().split(':');
-        const agent = new SocksProxyAgent(`socks5://${user}:${pass}@${host}:${port}`);
-        axiosConfig.httpAgent = agent;
-        axiosConfig.httpsAgent = agent;
-
         try {
+            const [host, port, user, pass] = currentProxy.trim().split(':');
+            const agent = new SocksProxyAgent(`socks5://${user}:${pass}@${host}:${port}`);
+            axiosConfig.httpAgent = agent;
+            axiosConfig.httpsAgent = agent;
+
             const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', axiosConfig);
             if (response.data.success) {
                 success = true;
-                return sendSuccess(interaction, response.data.data, `Proxy Attempt ${attempts}`);
+                return sendSuccess(interaction, response.data.data, `Random Proxy: ${host}`);
             }
-        } catch (e) { console.log(`Proxy fail: ${e.message}`); }
+        } catch (e) { 
+            console.log(`Proxy fail: ${e.message}`); 
+            // If it's the last attempt and it failed, we fall through to Phase 2
+        }
     }
 
     // --- PHASE 2: FALLBACK (Direct Connection) ---
     if (!success) {
-        statusEmbed.setDescription(`✅ **Inputs Validated**\n⚠️ **Proxies Failed/Skipped**\n🟡 **Attempting Direct Connection...**`);
+        statusEmbed.setDescription(`✅ **Inputs Validated**\n⚠️ **Random Proxies Failed/Skipped**\n🟡 **Attempting Direct Connection (Fallback)...**`);
         await interaction.editReply({ embeds: [statusEmbed] });
 
         try {
             const response = await axios.get('https://gapi.hotmail007.com/v1/mail/getFirstMail', {
                 params: { clientKey: cleanKey, account: cleanAccount, folder: 'inbox' },
-                timeout: 10000
+                timeout: 12000
             });
 
             if (response.data.success) {
@@ -96,7 +106,7 @@ async function handleEmailFetch(interaction, targetKey, accountData, useProxy = 
             }
         } catch (error) {
             statusEmbed.setColor(0x000000).setTitle('🔥 All Methods Failed')
-                .setDescription(`❌ **Proxy Attempts:** Failed\n❌ **Direct Fallback:** ${error.message}`);
+                .setDescription(`❌ **Random Proxies:** Failed\n❌ **Direct Fallback:** ${error.message}`);
             await interaction.editReply({ embeds: [statusEmbed] });
         }
     }
@@ -107,7 +117,8 @@ function sendSuccess(interaction, data, method) {
         .setTitle('📧 Email Found Successfully')
         .setColor(0x57F287)
         .setDescription(`\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``)
-        .setFooter({ text: `Method: ${method}` });
+        .setFooter({ text: `Method: ${method}` })
+        .setTimestamp();
     return interaction.editReply({ embeds: [embed] });
 }
 
@@ -131,7 +142,10 @@ client.on('interactionCreate', async i => {
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log(`✅ Bot Online | Fallback Enabled`);
+    try {
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log(`✅ Bot Online | Random Rotation Active (${PRIVATE_PROXIES.length} proxies)`);
+    } catch (err) { console.error(err); }
 });
+
 client.login(DISCORD_TOKEN);
