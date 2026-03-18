@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
-const socksAdapter = require('axios-socks-proxy-adapter');
+const socksAdapter = require('axios-socks5-adapter');
 const express = require('express');
 
 // --- 1. IMPORT PROXY LIST ---
