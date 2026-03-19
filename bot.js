@@ -21,7 +21,6 @@ const port = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot Active'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
-// Professional HTML Preview Route
 app.get('/view/:id', (req, res) => {
     const data = tempHtmlStore.get(req.params.id);
     if (data) {
@@ -40,7 +39,6 @@ app.get('/view/:id', (req, res) => {
                     .meta-row { font-size: 14px; margin-bottom: 5px; color: #666; }
                     .meta-label { font-weight: 600; color: #444; width: 60px; display: inline-block; }
                     .email-content { padding: 25px; line-height: 1.6; overflow-x: auto; }
-                    /* Ensure images inside the email don't break the layout */
                     .email-content img { max-width: 100% !important; height: auto !important; }
                 </style>
                 <title>Email Preview</title>
@@ -52,15 +50,13 @@ app.get('/view/:id', (req, res) => {
                         <div class="meta-row"><span class="meta-label">From:</span> ${data.from || 'Unknown'}</div>
                         <div class="meta-row"><span class="meta-label">Date:</span> ${data.date || 'N/A'}</div>
                     </div>
-                    <div class="email-content">
-                        ${data.htmlBody}
-                    </div>
+                    <div class="email-content">${data.htmlBody}</div>
                 </div>
             </body>
             </html>
         `);
     } else {
-        res.status(404).send('<h1>Link Expired</h1><p>Email previews are automatically deleted after 60 seconds.</p>');
+        res.status(404).send('<h1>Link Expired</h1><p>Previews are purged after 60 seconds.</p>');
     }
 });
 
@@ -95,9 +91,22 @@ const commands = [
         .addStringOption(opt => opt.setName('proxy').setDescription('SOCKS5 (host:port:user:pass)').setRequired(false))
 ].map(c => c.toJSON());
 
-// --- 4. CORE FETCH LOGIC ---
+// --- 4. CORE FETCH LOGIC (With Progress Embed) ---
 async function handleEmailFetch(interaction, targetKey, accountData, displayType, useRotation = false, manualProxy = null) {
-    if (!interaction.deferred) await interaction.deferReply();
+    const statusEmbed = new EmbedBuilder()
+        .setTitle('🔍 Processing Request')
+        .setColor(0xFEE75C)
+        .setDescription(`🟡 **Validating Inputs**\n⚪ **Proxy Connection**\n⚪ **Fetching Email Data**`);
+
+    if (!interaction.deferred && !interaction.replied) {
+        await interaction.reply({ embeds: [statusEmbed] });
+    }
+
+    const cleanKey = targetKey.trim();
+    const cleanAccount = accountData.trim();
+    
+    statusEmbed.setDescription(`✅ **Inputs Validated**\n🟡 **Connecting to Proxy**\n⚪ **Fetching Email Data**`);
+    await interaction.editReply({ embeds: [statusEmbed] });
 
     let attempts = 0;
     const maxProxyAttempts = (useRotation || manualProxy) ? 3 : 0;
@@ -107,8 +116,11 @@ async function handleEmailFetch(interaction, targetKey, accountData, displayType
         attempts++;
         const isFallback = (attempts > maxProxyAttempts);
         
+        statusEmbed.setDescription(`✅ **Inputs Validated**\n✅ **Proxy Assigned (Attempt ${attempts})**\n🟡 **Fetching Email Data**`);
+        await interaction.editReply({ embeds: [statusEmbed] });
+
         const axiosConfig = { 
-            params: { clientKey: targetKey.trim(), account: accountData.trim(), folder: 'inbox' },
+            params: { clientKey: cleanKey, account: cleanAccount, folder: 'inbox' },
             timeout: 15000 
         };
 
@@ -129,34 +141,35 @@ async function handleEmailFetch(interaction, targetKey, accountData, displayType
                 success = true;
                 const email = response.data.data;
                 const bodyText = email.body || "";
-                const htmlContent = email.Html || email.body; // Priority to Html field
+                const htmlContent = email.Html || email.body;
 
-                const embed = new EmbedBuilder().setColor(0x57F287).setTimestamp();
+                const finalEmbed = new EmbedBuilder().setColor(0x57F287).setTimestamp();
 
                 if (displayType === 'extract') {
                     const codeMatch = bodyText.match(/\b\d{6}\b/);
-                    embed.setTitle('🔢 Verification Code').setDescription(`Code: **${codeMatch ? codeMatch[0] : "Not found"}**`);
+                    finalEmbed.setTitle('🔢 Verification Code').setDescription(`Code: **${codeMatch ? codeMatch[0] : "Not found"}**`);
                 } 
                 else if (displayType === 'html') {
                     const viewId = crypto.randomBytes(8).toString('hex');
-                    // Store full object for the professional header
                     tempHtmlStore.set(viewId, {
                         subject: email.subject,
                         from: email.from,
                         date: email.date || new Date().toLocaleString(),
                         htmlBody: htmlContent
                     });
-                    
                     setTimeout(() => tempHtmlStore.delete(viewId), 60000);
-                    embed.setTitle('🌐 HTML View Ready').setDescription(`Link expires in 60s:\n[**View Formatted Email**](${BOT_DOMAIN}/view/${viewId})`);
+                    finalEmbed.setTitle('🌐 HTML View Ready').setDescription(`Link expires in 60s:\n[**View Formatted Email**](${BOT_DOMAIN}/view/${viewId})`);
                 } 
                 else {
-                    embed.setTitle('📧 Raw JSON Result').setDescription(`\`\`\`json\n${JSON.stringify(email, null, 2).substring(0, 1900)}\n\`\`\``);
+                    finalEmbed.setTitle('📧 Raw JSON Result').setDescription(`\`\`\`json\n${JSON.stringify(email, null, 2).substring(0, 1900)}\n\`\`\``);
                 }
-                return interaction.editReply({ embeds: [embed] });
+                return interaction.editReply({ embeds: [finalEmbed] });
             }
         } catch (e) {
-            if (isFallback) return interaction.editReply(`❌ Error: ${e.message}`);
+            if (isFallback || attempts > maxProxyAttempts) {
+                statusEmbed.setColor(0xED4245).setTitle('❌ Request Failed').setDescription(`✅ **Inputs Validated**\n✅ **Proxy Attempts Finished**\n❌ **Error:** ${e.message}`);
+                return interaction.editReply({ embeds: [statusEmbed] });
+            }
         }
     }
 }
@@ -164,7 +177,6 @@ async function handleEmailFetch(interaction, targetKey, accountData, displayType
 // --- 5. INTERACTION HANDLER ---
 client.on('interactionCreate', async i => {
     if (!i.isChatInputCommand()) return;
-
     const account = i.options.getString('account');
     const display = i.options.getString('display');
 
@@ -185,7 +197,7 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
     try {
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log(`✅ ${client.user.tag} Online | HTML Header System Active`);
+        console.log(`✅ ${client.user.tag} Online | Checklist & HTML Active`);
     } catch (err) { console.error(err); }
 });
 
