@@ -21,23 +21,55 @@ const port = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot Active'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
+// Professional HTML Preview Route
 app.get('/view/:id', (req, res) => {
-    const html = tempHtmlStore.get(req.params.id);
-    if (html) {
+    const data = tempHtmlStore.get(req.params.id);
+    if (data) {
         res.setHeader('Content-Type', 'text/html');
-        res.send(html);
+        res.send(`
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background-color: #f4f4f7; color: #333; }
+                    .email-wrapper { max-width: 800px; margin: 20px auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+                    .email-header { padding: 25px; border-bottom: 1px solid #eee; background-color: #ffffff; }
+                    .subject { font-size: 24px; font-weight: 700; color: #1a1a1a; margin-bottom: 15px; line-height: 1.2; }
+                    .meta-row { font-size: 14px; margin-bottom: 5px; color: #666; }
+                    .meta-label { font-weight: 600; color: #444; width: 60px; display: inline-block; }
+                    .email-content { padding: 25px; line-height: 1.6; overflow-x: auto; }
+                    /* Ensure images inside the email don't break the layout */
+                    .email-content img { max-width: 100% !important; height: auto !important; }
+                </style>
+                <title>Email Preview</title>
+            </head>
+            <body>
+                <div class="email-wrapper">
+                    <div class="email-header">
+                        <div class="subject">${data.subject || 'No Subject'}</div>
+                        <div class="meta-row"><span class="meta-label">From:</span> ${data.from || 'Unknown'}</div>
+                        <div class="meta-row"><span class="meta-label">Date:</span> ${data.date || 'N/A'}</div>
+                    </div>
+                    <div class="email-content">
+                        ${data.htmlBody}
+                    </div>
+                </div>
+            </body>
+            </html>
+        `);
     } else {
-        res.status(404).send('<h1>Link Expired</h1><p>Previews are purged after 60 seconds.</p>');
+        res.status(404).send('<h1>Link Expired</h1><p>Email previews are automatically deleted after 60 seconds.</p>');
     }
 });
 
 app.listen(port, '0.0.0.0', () => console.log(`✅ Web Server Online`));
 
-// --- 3. DISCORD CLIENT & COMMANDS ---
+// --- 3. DISCORD CLIENT ---
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
-    // Admin Command
     new SlashCommandBuilder()
         .setName('check')
         .setDescription('Admin: Fetch email with Proxy Rotation')
@@ -49,7 +81,6 @@ const commands = [
                 { name: 'View as HTML Webpage', value: 'html' },
                 { name: 'Raw JSON Data', value: 'json' }
             )),
-    // Public Command
     new SlashCommandBuilder()
         .setName('usercheck')
         .setDescription('Public: Fetch email with custom key/proxy')
@@ -97,18 +128,27 @@ async function handleEmailFetch(interaction, targetKey, accountData, displayType
             if (response.data.success) {
                 success = true;
                 const email = response.data.data;
-                const body = email.body || "";
+                const bodyText = email.body || "";
+                const htmlContent = email.Html || email.body; // Priority to Html field
+
                 const embed = new EmbedBuilder().setColor(0x57F287).setTimestamp();
 
                 if (displayType === 'extract') {
-                    const codeMatch = body.match(/\b\d{6}\b/);
+                    const codeMatch = bodyText.match(/\b\d{6}\b/);
                     embed.setTitle('🔢 Verification Code').setDescription(`Code: **${codeMatch ? codeMatch[0] : "Not found"}**`);
                 } 
                 else if (displayType === 'html') {
                     const viewId = crypto.randomBytes(8).toString('hex');
-                    tempHtmlStore.set(viewId, body);
+                    // Store full object for the professional header
+                    tempHtmlStore.set(viewId, {
+                        subject: email.subject,
+                        from: email.from,
+                        date: email.date || new Date().toLocaleString(),
+                        htmlBody: htmlContent
+                    });
+                    
                     setTimeout(() => tempHtmlStore.delete(viewId), 60000);
-                    embed.setTitle('🌐 HTML View Ready').setDescription(`Link expires in 60s:\n[**View Email Content**](${BOT_DOMAIN}/view/${viewId})`);
+                    embed.setTitle('🌐 HTML View Ready').setDescription(`Link expires in 60s:\n[**View Formatted Email**](${BOT_DOMAIN}/view/${viewId})`);
                 } 
                 else {
                     embed.setTitle('📧 Raw JSON Result').setDescription(`\`\`\`json\n${JSON.stringify(email, null, 2).substring(0, 1900)}\n\`\`\``);
@@ -143,7 +183,10 @@ client.on('interactionCreate', async i => {
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log(`✅ ${client.user.tag} Online | Check & UserCheck Restored`);
+    try {
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log(`✅ ${client.user.tag} Online | HTML Header System Active`);
+    } catch (err) { console.error(err); }
 });
+
 client.login(DISCORD_TOKEN);
